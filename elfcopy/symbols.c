@@ -46,10 +46,18 @@ struct symbuf {
 	size_t gcap, lcap; 	/* buffer capacities. */
 };
 
+struct sthash {
+	LIST_ENTRY(sthash) sh_next;
+	size_t sh_off;
+};
+typedef LIST_HEAD(,sthash) hash_head;
+#define STHASHSIZE 65536
+
 struct strimpl {
 	char *buf;		/* string table */
 	size_t sz;		/* entries */
 	size_t cap;		/* buffer capacity */
+	hash_head hash[STHASHSIZE];
 };
 
 
@@ -67,10 +75,12 @@ static int	is_needed_symbol(struct elfcopy *ecp, int i, GElf_Sym *s);
 static int	is_remove_symbol(struct elfcopy *ecp, size_t sc, int i,
 		    GElf_Sym *s, const char *name);
 static int	is_weak_symbol(unsigned char st_info);
-static int	lookup_exact_string(const char *buf, size_t sz, const char *s);
+static int	lookup_exact_string(hash_head *hash, const char *buf,
+		    const char *s);
 static int	generate_symbols(struct elfcopy *ecp);
 static void	mark_symbols(struct elfcopy *ecp, size_t sc);
 static int	match_wildcard(const char *name, const char *pattern);
+uint32_t	str_hash(const char *s);
 
 /* Convenient bit vector operation macros. */
 #define BIT_SET(v, n) (v[(n)>>3] |= 1U << ((n) & 7))
@@ -638,6 +648,8 @@ free_symtab(struct elfcopy *ecp)
 {
 	struct symbuf	*sy_buf;
 	struct strbuf	*st_buf;
+	struct sthash	*sh, *shtmp;
+	int i;
 
 	if (ecp->symtab != NULL && ecp->symtab->buf != NULL) {
 		sy_buf = ecp->symtab->buf;
@@ -657,6 +669,18 @@ free_symtab(struct elfcopy *ecp)
 			free(st_buf->l.buf);
 		if (st_buf->g.buf != NULL)
 			free(st_buf->g.buf);
+		for (i = 0; i < STHASHSIZE; i++) {
+			LIST_FOREACH_SAFE(sh, &st_buf->l.hash[i], sh_next,
+			    shtmp) {
+				LIST_REMOVE(sh, sh_next);
+				free(sh);
+			}
+			LIST_FOREACH_SAFE(sh, &st_buf->g.hash[i], sh_next,
+			    shtmp) {
+				LIST_REMOVE(sh, sh_next);
+				free(sh);
+			}
+		}
 	}
 }
 
@@ -734,6 +758,8 @@ add_to_symtab(struct elfcopy *ecp, const char *name, uint64_t st_value,
 {
 	struct symbuf *sy_buf;
 	struct strbuf *st_buf;
+	struct sthash *sh;
+	uint32_t hash;
 	int pos;
 
 	/*
@@ -773,8 +799,8 @@ add_to_symtab(struct elfcopy *ecp, const char *name, uint64_t st_value,
 			err(EXIT_FAILURE, "malloc failed");		\
 	}								\
 	if (name != NULL && *name != '\0') {				\
-		pos = lookup_exact_string(st_buf->B.buf,		\
-		    st_buf->B.sz, name);				\
+		pos = lookup_exact_string(st_buf->B.hash, st_buf->B.buf,	\
+		    name);						\
 		if (pos != -1)						\
 			sy_buf->B##SZ[sy_buf->n##B##s].st_name = pos;	\
 		else {							\
@@ -789,6 +815,12 @@ add_to_symtab(struct elfcopy *ecp, const char *name, uint64_t st_value,
 					err(EXIT_FAILURE,		\
 					    "realloc failed");		\
 			}						\
+			if ((sh = malloc(sizeof(*sh))) == NULL)		\
+				err(EXIT_FAILURE, "malloc failed");	\
+			sh->sh_off = st_buf->B.sz;			\
+			hash = str_hash(name);				\
+			LIST_INSERT_HEAD(&st_buf->B.hash[hash], sh,	\
+			    sh_next);					\
 			strncpy(&st_buf->B.buf[st_buf->B.sz], name,	\
 			    strlen(name));				\
 			st_buf->B.buf[st_buf->B.sz + strlen(name)] = '\0'; \
@@ -1028,18 +1060,25 @@ lookup_symop_list(struct elfcopy *ecp, const char *name, unsigned int op)
 }
 
 static int
-lookup_exact_string(const char *buf, size_t sz, const char *s)
+lookup_exact_string(hash_head *buckets, const char *buf, const char *s)
 {
-	const char	*b;
-	size_t		 slen;
+	struct sthash	*sh;
+	uint32_t	 hash;
 
-	slen = strlen(s);
-	for (b = buf; b < buf + sz; b += strlen(b) + 1) {
-		if (strlen(b) != slen)
-			continue;
-		if (!strcmp(b, s))
-			return (b - buf);
-	}
-
+	hash = str_hash(s);
+	LIST_FOREACH(sh, &buckets[hash], sh_next)
+		if (strcmp(buf + sh->sh_off, s) == 0)
+			return sh->sh_off;
 	return (-1);
+}
+
+uint32_t
+str_hash(const char *s)
+{
+	uint32_t hash;
+
+	for (hash = 2166136261; *s; s++)
+		hash = (hash ^ *s) * 16777619;
+
+	return (hash & (STHASHSIZE - 1));
 }
