@@ -340,7 +340,7 @@ struct name {							\
 #endif	/* __DragonFly__ || __FreeBSD__ || __minix || __NetBSD__ */
 
 
-#if defined(__GLIBC__)
+#if defined(__linux__)
 
 /*
  * GLIBC based systems have a global 'char *' pointer referencing
@@ -381,7 +381,7 @@ extern const char *__progname;
 
 #endif
 
-#if defined(__GLIBC__)
+#if defined(__linux__)
 
 #include <endian.h>
 
